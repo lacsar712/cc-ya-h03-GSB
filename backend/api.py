@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -8,6 +9,7 @@ from passlib.context import CryptContext
 from quart import Quart, jsonify, request
 
 from db import SCHEMA, connect
+from projection import serialize_log, serialize_logs
 from rules import judge
 
 SECRET = os.environ.get("JWT_SECRET", "yaw-align-dev-secret")
@@ -152,9 +154,12 @@ async def list_logs(user):
             ).fetchall()
 
     rows = await run_db(query)
-    payload = [dict(r) for r in rows]
-    from h03_map_trap import expose_list
-    return jsonify(expose_list(payload))
+    # 严格投影：任一行缺读数即整批失败，绝不返回半空行
+    try:
+        payload = serialize_logs(rows)
+    except ValueError as exc:
+        return jsonify({"detail": f"列表投影失败，已拒绝返回半空数据: {exc}"}), 500
+    return jsonify(payload)
 
 
 @app.post("/api/logs")
@@ -168,6 +173,8 @@ async def create_log(user):
         yaw_err_deg = float(body.get("yaw_err_deg"))
     except (TypeError, ValueError):
         return jsonify({"detail": "偏航误差必须是数字"}), 400
+    if not math.isfinite(yaw_err_deg):
+        return jsonify({"detail": "偏航误差必须是有限数字"}), 400
 
     now = datetime.now(timezone.utc)
 
@@ -186,5 +193,8 @@ async def create_log(user):
             return row
 
     row = await run_db(insert)
-    from h03_extra_trap import apply_blank
-    return jsonify(apply_blank(dict(row), "create")), 201
+    try:
+        payload = serialize_log(row)
+    except ValueError as exc:
+        return jsonify({"detail": f"新建投影失败: {exc}"}), 500
+    return jsonify(payload), 201
