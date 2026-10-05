@@ -8,6 +8,7 @@ from passlib.context import CryptContext
 from quart import Quart, jsonify, request
 
 from db import SCHEMA, connect
+from projection import ProjectionError, project_log, project_log_list
 from rules import judge
 
 SECRET = os.environ.get("JWT_SECRET", "yaw-align-dev-secret")
@@ -140,21 +141,46 @@ async def login():
     )
 
 
+LOG_COLUMNS = """id, turbine_code, yaw_err_deg, status, verdict, reason,
+                 created_by, created_at, processed_at"""
+
+
 @app.get("/api/logs")
 @require_login
 async def list_logs(user):
     def query():
         with connect() as conn:
             return conn.execute(
-                """SELECT id, turbine_code, yaw_err_deg, status, verdict, reason,
-                          created_by, created_at, processed_at
-                   FROM yaw_logs ORDER BY id DESC"""
+                f"SELECT {LOG_COLUMNS} FROM yaw_logs ORDER BY id DESC"
             ).fetchall()
 
     rows = await run_db(query)
-    payload = [dict(r) for r in rows]
-    from h03_map_trap import expose_list
-    return jsonify(expose_list(payload))
+    try:
+        # 整批投影：任一行非法就整体失败，绝不向前端吐出部分半空行。
+        payload = project_log_list([dict(r) for r in rows])
+    except ProjectionError as exc:
+        return jsonify({"detail": f"列表投影失败，已整批弃用: {exc}"}), 500
+    return jsonify(payload)
+
+
+@app.get("/api/logs/<int:log_id>")
+@require_login
+async def get_log(user, log_id):
+    def query():
+        with connect() as conn:
+            return conn.execute(
+                f"SELECT {LOG_COLUMNS} FROM yaw_logs WHERE id = %s",
+                (log_id,),
+            ).fetchone()
+
+    row = await run_db(query)
+    if row is None:
+        return jsonify({"detail": "记录不存在"}), 404
+    try:
+        payload = project_log(dict(row))
+    except ProjectionError as exc:
+        return jsonify({"detail": f"详情投影失败: {exc}"}), 500
+    return jsonify(payload)
 
 
 @app.post("/api/logs")
@@ -186,5 +212,8 @@ async def create_log(user):
             return row
 
     row = await run_db(insert)
-    from h03_extra_trap import apply_blank
-    return jsonify(apply_blank(dict(row), "create")), 201
+    try:
+        payload = project_log(dict(row))
+    except ProjectionError as exc:
+        return jsonify({"detail": f"创建响应投影失败: {exc}"}), 500
+    return jsonify(payload), 201

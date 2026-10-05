@@ -125,6 +125,9 @@ export class YawAlignApp extends LitElement {
 
   @state() private session: Session | null = null;
   @state() private logs: LogRow[] = [];
+  @state() private detail: LogRow | null = null;
+  @state() private detailLoading = false;
+  @state() private detailError = "";
   @state() private loginUser = "technician";
   @state() private loginPass = "tech123456";
   @state() private turbineCode = "";
@@ -174,6 +177,42 @@ export class YawAlignApp extends LitElement {
     } catch {
       /* ignore transient network errors */
     }
+  }
+
+  // 读数保真格式化：仅 null/undefined 视为缺失；0 是合法读数，必须显示为 0。
+  private formatYaw(value: number | null | undefined): string {
+    if (value === null || value === undefined) return "—";
+    return String(value);
+  }
+
+  private async openDetail(id: number) {
+    if (!this.session) return;
+    this.detailError = "";
+    this.detailLoading = true;
+    this.detail = null;
+    try {
+      const res = await fetch(`/api/logs/${id}`, { headers: this.authHeaders() });
+      if (res.status === 401) {
+        this.logout();
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        this.detailError = data.detail || "加载详情失败";
+        return;
+      }
+      this.detail = data as LogRow;
+    } catch {
+      this.detailError = "详情网络异常";
+    } finally {
+      this.detailLoading = false;
+    }
+  }
+
+  private closeDetail() {
+    this.detail = null;
+    this.detailError = "";
+    this.detailLoading = false;
   }
 
   private async login() {
@@ -334,6 +373,7 @@ export class YawAlignApp extends LitElement {
               <th>状态</th>
               <th>结论</th>
               <th>说明</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -342,7 +382,7 @@ export class YawAlignApp extends LitElement {
                 <tr>
                   <td>${row.id}</td>
                   <td>${row.turbine_code}</td>
-                  <td>${/* h03-trap-blank */ row.yaw_err_deg === 0 || row.yaw_err_deg == null ? "" : row.yaw_err_deg}</td>
+                  <td>${this.formatYaw(row.yaw_err_deg)}</td>
                   <td>
                     <span class="tag ${row.status === "pending" ? "pending" : "ok"}">
                       ${row.status === "pending" ? "待处理" : "已完成"}
@@ -354,12 +394,55 @@ export class YawAlignApp extends LitElement {
                       : "—"}
                   </td>
                   <td>${row.reason ?? "—"}</td>
+                  <td>
+                    <button class="secondary" @click=${() => void this.openDetail(row.id)}>
+                      详情
+                    </button>
+                  </td>
                 </tr>
               `
             )}
           </tbody>
         </table>
       </section>
+
+      ${this.detailLoading
+        ? html`<section><p class="sub" style="margin:0;">详情加载中…</p></section>`
+        : this.detailError
+          ? html`<section>
+              <p class="err" style="margin:0 0 0.5rem;">${this.detailError}</p>
+              <button class="secondary" @click=${this.closeDetail}>关闭</button>
+            </section>`
+          : this.detail
+            ? html`
+                <section>
+                  <h2 style="margin-top:0;font-size:1.1rem;">
+                    记录详情 #${this.detail.id}
+                  </h2>
+                  <table>
+                    <tbody>
+                      <tr><th>机组</th><td>${this.detail.turbine_code}</td></tr>
+                      <tr>
+                        <th>偏航读数（度）</th>
+                        <td>${this.formatYaw(this.detail.yaw_err_deg)}</td>
+                      </tr>
+                      <tr>
+                        <th>状态</th>
+                        <td>${this.detail.status === "pending" ? "待处理" : "已完成"}</td>
+                      </tr>
+                      <tr><th>结论</th><td>${this.detail.verdict ?? "—"}</td></tr>
+                      <tr><th>说明</th><td>${this.detail.reason ?? "—"}</td></tr>
+                      <tr><th>报送人</th><td>${this.detail.created_by}</td></tr>
+                      <tr>
+                        <th>处理时间</th>
+                        <td>${this.detail.processed_at ?? "—"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <button class="secondary" @click=${this.closeDetail}>关闭</button>
+                </section>
+              `
+            : null}
     `;
   }
 }
